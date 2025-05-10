@@ -93,7 +93,7 @@ def round_up(value, decimal_places=2):
 def calculate_kalshi_fees(contract_price, shares, fee_rate=0.07):
     fee = round_up(fee_rate * shares * contract_price * (1-contract_price))
     return fee
-result = check_markets_arbitrage(0.22, 0.81, 0.19, 0.86, 100.0)
+
 async def main():
     load_dotenv()
     env = Environment.PROD
