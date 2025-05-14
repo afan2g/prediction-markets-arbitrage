@@ -2,7 +2,7 @@ from py_clob_client.client import ClobClient
 import asyncio
 import json
 import websockets  # Need to use asyncio-compatible websockets library
-
+from decimal import *
 
 class AsyncMarketDataClient:
     """
@@ -32,6 +32,8 @@ class AsyncMarketDataClient:
         self._running = False
         self._task = None
         self._callback = callback
+        self.tick_size = None
+        self.decimal_places = 2
 
 
 
@@ -55,16 +57,16 @@ class AsyncMarketDataClient:
             # else:
             #     print("received unknown message", message)
 
-    async def on_connect(self, websocket):
+    async def on_connect(self, websocket, condition_id):
         """
         WebSocket connection opened handler. Subscribes to market data.
         
         Args:
             websocket: WebSocket connection object
         """
-        print("WebSocket connection opened.")
+        print("Polymarket WebSocket connection opened.")
         # Subscribe to the desired channels
-        asset_ids = self.get_markets("0xfc0c7d71b0a6fba179e4b37db95648faa37eadbfb48e611006c92a0ec30b12d2")
+        asset_ids = self.get_markets(condition_id)
         subscribe_message = {
             "type": "market",
             "assets_ids": asset_ids,
@@ -84,10 +86,13 @@ class AsyncMarketDataClient:
         """
         print("Condition ID:", condition_id)
         market = self.client.get_market(condition_id)
+        print("Polymarket market:", market)
         self.tick_size = market["minimum_tick_size"]
+        self.decimal_places = len(str(self.tick_size).split(".")[1]) if "." in str(self.tick_size) else 0
+        getcontext().prec = self.decimal_places + 2
         asset_ids = []
         for token in market["tokens"]:
-            if token["outcome"] != "Yes" and token["outcome"] != "No":
+            if token["outcome"].lower() != "yes" and token["outcome"].lower != "no":
                 asset_ids.append(token["token_id"])
                 self.orderbook[token["token_id"]] = self.client.get_order_book(token["token_id"]).__dict__
                 self.orderbook[token["token_id"]]["outcome"] = token["outcome"]
@@ -102,13 +107,14 @@ class AsyncMarketDataClient:
         Args:
             message (dict): Message containing book data
         """
+
+
         asset_id = message["asset_id"]
         self.orderbook[asset_id]["bids"] = message["bids"]
         self.orderbook[asset_id]["asks"] = message["asks"]
         self.orderbook[asset_id]["timestamp"] = message["timestamp"]
-        self.orderbook[asset_id]["spread"] = round(float(message["asks"][-1]["price"]) - float(message["bids"][-1]["price"]),2)
-        self.orderbook[asset_id]["mid"] = round((float(message["asks"][-1]["price"]) + float(message["bids"][-1]["price"])) / 2,2)
-        # print("Orderbook updated from book")
+        self.orderbook[asset_id]["spread"] = Decimal(message["asks"][-1]["price"]) - Decimal(message["bids"][-1]["price"])
+        self.orderbook[asset_id]["mid"] = (Decimal(message["asks"][-1]["price"]) + Decimal(message["bids"][-1]["price"])) / Decimal("2")
 
     def update_orderbook_from_price_change(self, message):
         """
@@ -121,10 +127,10 @@ class AsyncMarketDataClient:
         for change in changes:
             price, side, size = change["price"], change["side"], change["size"]
             self.update_orderbook_levels(asset_id, price, side, size)
+
         self.orderbook[asset_id]["timestamp"] = message["timestamp"]
-        self.orderbook[asset_id]["spread"] = round(float(self.orderbook[asset_id]["asks"][-1]["price"]) - float(self.orderbook[asset_id]["bids"][-1]["price"]),2)
-        self.orderbook[asset_id]["mid"] = round((float(self.orderbook[asset_id]["asks"][-1]["price"]) + float(self.orderbook[asset_id]["bids"][-1]["price"])) / 2,2)
-        # print("Orderbook updated from price change")
+        self.orderbook[asset_id]["spread"] = Decimal(self.orderbook[asset_id]["asks"][-1]["price"]) - Decimal(self.orderbook[asset_id]["bids"][-1]["price"])
+        self.orderbook[asset_id]["mid"] = (Decimal(self.orderbook[asset_id]["asks"][-1]["price"]) + Decimal(self.orderbook[asset_id]["bids"][-1]["price"])) / Decimal(2)
 
     def update_orderbook_levels(self, asset_id, price, side, size):
         """
@@ -137,11 +143,17 @@ class AsyncMarketDataClient:
             size (str): Size at the price level
         """
         trade_side = "bids" if side == "BUY" else "asks"
-        n = len(self.orderbook[asset_id][trade_side])
-        for i in range(n-1, -1, -1):
-            if self.orderbook[asset_id][trade_side][i]["price"] == price:
-                self.orderbook[asset_id][trade_side][i]["size"] = size
-                break
+        index = self.find_index(price, asset_id, trade_side)
+        if index == len(self.orderbook[asset_id][trade_side]):
+            self.orderbook[asset_id][trade_side].append({"price": price, "size": size})
+            return
+        if self.orderbook[asset_id][trade_side][index]["price"] != price:
+            self.orderbook[asset_id][trade_side].insert(index, {"price": price, "size": size})
+        else:
+            if size == 0:
+                self.orderbook[asset_id][trade_side].pop(index)
+            else:
+                self.orderbook[asset_id][trade_side][index]["size"] = size
 
     def get_best_bidasks(self):
         """
@@ -150,15 +162,16 @@ class AsyncMarketDataClient:
         Returns:
             dict: Dictionary mapping outcomes to their best bid/ask data
         """
+
         best_bidasks = {}
         for asset_id, book in self.orderbook.items():
             if book["bids"] and book["asks"]:
                 best_bid = book["bids"][-1]
                 best_ask = book["asks"][-1]
                 best_bidasks[book["outcome"]] = {
-                    "best_bid": (round(float(best_bid['price']),2), round(float(best_bid["size"]),2)),
-                    "best_ask": (round(float(best_ask['price']),2), round(float(best_ask["size"]),2)),
-                    "spread": round(float(best_ask["price"]) - float(best_bid["price"]), 2),
+                    "best_bid": (best_bid['price'], best_bid["size"]),
+                    "best_ask": (best_ask['price'], best_ask["size"]),
+                    "spread": str(Decimal(best_ask["price"]) - Decimal(best_bid["price"])),
                     "timestamp": book["timestamp"],
                 }
         return best_bidasks
@@ -170,9 +183,7 @@ class AsyncMarketDataClient:
         Args:
             condition_id (str, optional): Market condition ID to subscribe to.
         """
-        if condition_id:
-            # Pre-fetch market data so it's ready when WS connects
-            self.get_markets(condition_id)
+
             
         uri = self.WSS + "market"
         async with websockets.connect(uri) as websocket:
@@ -180,7 +191,7 @@ class AsyncMarketDataClient:
             self._running = True
             
             # Subscribe to channels upon connection
-            await self.on_connect(websocket)
+            await self.on_connect(websocket, condition_id)
             
             # Message processing loop
             try:
@@ -189,8 +200,6 @@ class AsyncMarketDataClient:
                     message_data = json.loads(message)
                     self.parse_message(message_data)
                     best_bids = self.get_best_bidasks()
-                    # for outcome, bidasks in best_bids.items():
-                    #     print(f"Polymarket {outcome}: best bid: {bidasks['bid']} best ask: {bidasks['ask']} spread: {round(bidasks['spread'], 2)} timestamp: {bidasks['timestamp']}")
                     result =  {
                         "market": "Polymarket",
                         "best_offers": best_bids,
@@ -204,7 +213,7 @@ class AsyncMarketDataClient:
                 print("WebSocket connection closed.")
                 print("orderbook:", self.orderbook)
             except Exception as e:
-                print(f"Error in WebSocket handler: {e}")
+                print(f"Error in Polymarket WebSocket handler: {e}")
             finally:
                 self._running = False
                 self.websocket = None
@@ -243,6 +252,19 @@ class AsyncMarketDataClient:
         return self._running and self.websocket is not None
 
 
+    def find_index(self, price, asset_id, side):
+        arr = self.orderbook[asset_id][side]
+        price = Decimal(price)
+        l,r = 0, len(arr)-1
+        while l <= r:
+            mid = (l+r)// 2
+            if Decimal(arr[mid]["price"]) == price:
+                return mid
+            elif Decimal(arr[mid]["price"]) < price:
+                l = mid + 1
+            else:
+                r = mid - 1
+        return l
 # Example usage:
 async def main():
     # Create client instance

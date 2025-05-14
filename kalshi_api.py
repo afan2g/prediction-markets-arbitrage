@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional
 import base64
 from dotenv import load_dotenv
 import os
+import requests
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.backends import default_backend
@@ -103,11 +104,13 @@ class KalshiWebSocketClient(KalshiBaseClient):
         self.url_suffix = "/trade-api/ws/v2"
         self.message_id = 1  # Add counter for message IDs
         self._callback = callback
+        self.tickers = None
 
-    async def connect(self):
+    async def connect(self, tickers: Optional[list] = None):
         """Establishes a WebSocket connection using authentication."""
         host = self.WS_BASE_URL + self.url_suffix
         auth_headers = self.request_headers("GET", self.url_suffix)
+        self.tickers = tickers
         async with websockets.connect(host, additional_headers=auth_headers) as websocket:
             self.ws = websocket
             await self.on_open()
@@ -115,21 +118,23 @@ class KalshiWebSocketClient(KalshiBaseClient):
 
     async def on_open(self):
         """Callback when WebSocket connection is opened."""
-        print("WebSocket connection opened.")
+        print("Kalshi WebSocket connection opened.")
         await self.subscribe_to_tickers()
 
     async def subscribe_to_tickers(self):
         """Subscribe to ticker updates for all markets."""
+        print("Subscribing to tickers:", self.tickers)
         subscription_message = {
             "id": self.message_id,
             "cmd": "subscribe",
             "params": {
                 "channels": ["ticker_v2", "orderbook_delta"],
-                "market_tickers": ["KXNBAGAME-25MAY09OKCDEN-DEN", "KXNBAGAME-25MAY09OKCDEN-OKC"]
+                "market_tickers": self.tickers
             }
         }
         await self.ws.send(json.dumps(subscription_message))
         self.message_id += 1
+
 
     async def handler(self):
         """Handle incoming messages."""
@@ -144,7 +149,7 @@ class KalshiWebSocketClient(KalshiBaseClient):
 
     async def on_error(self, error):
         """Callback for handling errors."""
-        print("WebSocket error:", error)
+        print("Kalshi WebSocket error:", error)
 
     async def on_close(self, close_status_code, close_msg):
         """Callback when WebSocket connection is closed."""
