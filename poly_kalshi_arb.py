@@ -62,7 +62,6 @@ async def message_consumer(queue: asyncio.Queue):
 
 def check_arbitrage(market1_price: Decimal, market2_inverse_price: Decimal, shares: Decimal):
     market2_fee = calculate_kalshi_fees(market2_inverse_price, shares)
-    market2_fee = 0
     profit_if_win_market1 = (1 - market1_price) * shares
     profit_if_win_market2 = (1 - market2_inverse_price) * shares - market2_fee
     cost_market1 = market1_price * shares

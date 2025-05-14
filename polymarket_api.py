@@ -96,10 +96,9 @@ class AsyncMarketDataClient:
         getcontext().prec = self.decimal_places + 2
         asset_ids = []
         for token in market["tokens"]:
-            if token["outcome"].lower() != "yes" and token["outcome"].lower != "no":
-                asset_ids.append(token["token_id"])
-                self.orderbook[token["token_id"]] = self.client.get_order_book(token["token_id"]).__dict__
-                self.orderbook[token["token_id"]]["outcome"] = token["outcome"]
+            asset_ids.append(token["token_id"])
+            self.orderbook[token["token_id"]] = self.client.get_order_book(token["token_id"]).__dict__
+            self.orderbook[token["token_id"]]["outcome"] = token["outcome"]
 
         # print("Parsed Orderbook:", self.orderbook)
         return asset_ids
@@ -134,7 +133,7 @@ class AsyncMarketDataClient:
 
         self.orderbook[asset_id]["timestamp"] = message["timestamp"]
         self.orderbook[asset_id]["spread"] = Decimal(self.orderbook[asset_id]["asks"][-1]["price"]) - Decimal(self.orderbook[asset_id]["bids"][-1]["price"])
-        self.orderbook[asset_id]["mid"] = (Decimal(self.orderbook[asset_id]["asks"][-1]["price"]) + Decimal(self.orderbook[asset_id]["bids"][-1]["price"])) / Decimal(2)
+        self.orderbook[asset_id]["mid"] = (Decimal(self.orderbook[asset_id]["asks"][-1]["price"]) + Decimal(self.orderbook[asset_id]["bids"][-1]["price"])) / Decimal("2")
 
     def update_orderbook_levels(self, asset_id, price, side, size):
         """
