@@ -23,7 +23,11 @@ async def message_consumer(queue: asyncio.Queue):
     """Centralized consumer of all WS messages."""
     polymarket_offers = {}
     kalshi_offers = {}
-    markets = ['Nuggets', 'Thunder', 'KXNBAGAME-25MAY13DENOKC-DEN', 'KXNBAGAME-25MAY13DENOKC-OKC']
+    prev_price_levels = []
+    total_profit = 0
+    total_cost = 0
+
+    markets = ['Yankees', 'Mariners', "KXMLBGAME-25MAY13NYYSEA-NYY", "KXMLBGAME-25MAY13NYYSEA-SEA"]
     while True:
         source_name, payload = await queue.get()
         # e.g. combine Polymarket + Kalshi data, or forward to UI, DB, etc.
@@ -35,13 +39,28 @@ async def message_consumer(queue: asyncio.Queue):
         # Check for arbitrage opportunities
         if not polymarket_offers or not kalshi_offers:
             continue
-        result = check_markets_arbitrage(polymarket_offers[markets[0]]["best_ask"][0], polymarket_offers[markets[1]]["best_ask"][0], kalshi_offers[markets[2]]["best_ask"][0]/100.0, kalshi_offers[markets[3]]["best_ask"][0]/100.0, shares=1.0)
+        p1 = polymarket_offers[markets[0]]["best_ask"][0]
+        p2 = polymarket_offers[markets[1]]["best_ask"][0]
+        k1 = kalshi_offers[markets[2]]["best_ask"][0]
+        k2 = kalshi_offers[markets[3]]["best_ask"][0]
+        result = check_markets_arbitrage(p1, p2, Decimal(k1)/Decimal("100"), Decimal(k2)/Decimal("100"), shares=1.0)
         if result["is_arbitrage"]:
-            m1_action, m2_action, profit_per_share = result["market1_action"], result["market2_action"], result["profit_per_share"]
             print("arbitrage opportunity found! Strategy:", result["strategy"])
-            print("Market prices:", polymarket_offers[markets[m1_action]]["best_ask"], kalshi_offers[markets[m2_action+2]]["best_ask"])
+            m1_action, m2_action, profit_per_share = result["market1_action"], result["market2_action"], result["profit_per_share"]
+            p1_level = polymarket_offers[markets[m1_action]]["best_ask"][0]
+            p2_level = polymarket_offers[markets[m2_action]]["best_ask"][0]
+            k1_level = kalshi_offers[markets[m2_action+2]]["best_ask"][0]
+            k2_level = kalshi_offers[markets[m1_action+2]]["best_ask"][0]
+            if prev_price_levels and prev_price_levels[0] == p1_level and prev_price_levels[1] == k1_level and prev_price_levels[2] == p2_level and prev_price_levels[3] == k2_level:
+                print(f"No price change, skipping arbitrage opportunity. Total profit: {total_profit}, Total cost: {total_cost}")
+                continue
+            prev_price_levels = [p1_level, k1_level, p2_level, k2_level]
+            print("Market prices:", p1_level, k1_level, p2_level, k2_level)
             max_size_without_slippage = min(Decimal(polymarket_offers[markets[m1_action]]["best_ask"][1]), Decimal(kalshi_offers[markets[m2_action+2]]["best_ask"][1]))
-            print(f"Max size without slippage: {max_size_without_slippage}, Max Profit: {profit_per_share * max_size_without_slippage}")
+            cost = (Decimal(p1_level) * max_size_without_slippage) + (Decimal(k1_level)/Decimal("100") * max_size_without_slippage)
+            total_cost += cost
+            total_profit += profit_per_share * max_size_without_slippage
+            print(f"Max size without slippage: {max_size_without_slippage}, Profit: {profit_per_share * max_size_without_slippage}, Cost: {cost}, Total profit: {total_profit}, Total cost: {total_cost}")
         queue.task_done()
 
 
@@ -117,8 +136,8 @@ async def main():
     kalshi_client = KalshiWebSocketClient(kalshi_api_key_id, private_key, env, callback=lambda data: queue.put_nowait(("kalshi", data)))
 
     tasks = [
-        asyncio.create_task(polymarket_client.connect("0xd6f4deb24ebb0b924d9531d239d62e2b18230c3f74d8b789735651a729cb662c")),
-        asyncio.create_task(kalshi_client.connect(tickers=["KXNBAGAME-25MAY13DENOKC-DEN", "KXNBAGAME-25MAY13DENOKC-OKC"])),
+        asyncio.create_task(polymarket_client.connect("0xb5a2ae7880a6667a47ac7cbbbb3a881163eeea0f5acd69e7aa21642060637c32")),
+        asyncio.create_task(kalshi_client.connect(tickers=["KXMLBGAME-25MAY13NYYSEA-NYY", "KXMLBGAME-25MAY13NYYSEA-SEA"])),
         asyncio.create_task(message_consumer(queue))
     ]
 

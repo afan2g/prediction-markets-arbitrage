@@ -85,6 +85,7 @@ class AsyncMarketDataClient:
             list: List of asset IDs in the market
         """
         print("Condition ID:", condition_id)
+        print("Getting Polymarket markets...")
         market = self.client.get_market(condition_id)
         print("Polymarket market:", market)
         self.tick_size = market["minimum_tick_size"]
