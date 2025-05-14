@@ -50,8 +50,11 @@ class AsyncMarketDataClient:
                 self.update_orderbook(message)
             elif message["event_type"] == "price_change":
                 self.update_orderbook_from_price_change(message)
-            # elif message["event_type"] == "tick_size_change":
-            #     print("received tick size change")
+            elif message["event_type"] == "tick_size_change":
+                print("received tick size change")
+                self.tick_size = message["new_tick_size"]
+                self.decimal_places = len(str(self.tick_size).split(".")[1]) if "." in str(self.tick_size) else 0
+                getcontext().prec = self.decimal_places + 2
             # elif message["event_type"] == "last_trade_price":
             #     print("last trade price")
             # else:

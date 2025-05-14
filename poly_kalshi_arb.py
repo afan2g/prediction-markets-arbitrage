@@ -45,19 +45,15 @@ async def message_consumer(queue: asyncio.Queue):
         k2 = kalshi_offers[markets[3]]["best_ask"][0]
         result = check_markets_arbitrage(p1, p2, Decimal(k1)/Decimal("100"), Decimal(k2)/Decimal("100"), shares=1.0)
         if result["is_arbitrage"]:
-            print("arbitrage opportunity found! Strategy:", result["strategy"])
             m1_action, m2_action, profit_per_share = result["market1_action"], result["market2_action"], result["profit_per_share"]
-            p1_level = polymarket_offers[markets[m1_action]]["best_ask"][0]
-            p2_level = polymarket_offers[markets[m2_action]]["best_ask"][0]
-            k1_level = kalshi_offers[markets[m2_action+2]]["best_ask"][0]
-            k2_level = kalshi_offers[markets[m1_action+2]]["best_ask"][0]
-            if prev_price_levels and prev_price_levels[0] == p1_level and prev_price_levels[1] == k1_level and prev_price_levels[2] == p2_level and prev_price_levels[3] == k2_level:
+            print("arbitrage opportunity found! Strategy:", result["strategy"])
+            if prev_price_levels and [p1, p2, k1, k2] == prev_price_levels:
                 print(f"No price change, skipping arbitrage opportunity. Total profit: {total_profit}, Total cost: {total_cost}")
                 continue
-            prev_price_levels = [p1_level, k1_level, p2_level, k2_level]
-            print("Market prices:", p1_level, k1_level, p2_level, k2_level)
+            prev_price_levels = [p1, p2, k1, k2]
+            print("Market prices:", polymarket_offers[markets[m1_action]]["best_ask"], kalshi_offers[markets[m2_action+2]]["best_ask"])
             max_size_without_slippage = min(Decimal(polymarket_offers[markets[m1_action]]["best_ask"][1]), Decimal(kalshi_offers[markets[m2_action+2]]["best_ask"][1]))
-            cost = (Decimal(p1_level) * max_size_without_slippage) + (Decimal(k1_level)/Decimal("100") * max_size_without_slippage)
+            cost = (Decimal(polymarket_offers[markets[m1_action]]["best_ask"][0]) * max_size_without_slippage) + (Decimal(kalshi_offers[markets[m2_action+2]]["best_ask"][0])/Decimal("100") * max_size_without_slippage)
             total_cost += cost
             total_profit += profit_per_share * max_size_without_slippage
             print(f"Max size without slippage: {max_size_without_slippage}, Profit: {profit_per_share * max_size_without_slippage}, Cost: {cost}, Total profit: {total_profit}, Total cost: {total_cost}")

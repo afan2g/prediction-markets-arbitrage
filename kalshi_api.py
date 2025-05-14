@@ -202,7 +202,7 @@ class KalshiWebSocketClient(KalshiBaseClient):
                 self.orderbook[market_ticker][side].insert(idx, (price, delta))
                         
 
-    def find_index(self, price, ticker, side):
+    def find_index(self, price: int, ticker: str, side: str) -> int:
         arr = self.orderbook[ticker][side]
         l,r = 0, len(arr)-1
         while l <= r:
