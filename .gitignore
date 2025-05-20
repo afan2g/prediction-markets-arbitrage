@@ -1,2 +1,4 @@
 .env
 kalshi_test.pem
+__pycache__/
+*.pyc
