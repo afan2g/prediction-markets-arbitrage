@@ -73,6 +73,8 @@ class KalshiBaseClient:
             "KALSHI-ACCESS-TIMESTAMP": timestamp_str,
         }
         return headers
+    
+
 
     def sign_pss_text(self, text: str) -> str:
         """Signs the text using RSA-PSS and returns the base64 encoded signature."""
@@ -118,12 +120,12 @@ class KalshiWebSocketClient(KalshiBaseClient):
 
     async def on_open(self):
         """Callback when WebSocket connection is opened."""
-        print("Kalshi WebSocket connection opened.")
+        print("[kalshi] WebSocket connection opened.")
         await self.subscribe_to_tickers()
 
     async def subscribe_to_tickers(self):
         """Subscribe to ticker updates for all markets."""
-        print("Subscribing to tickers:", self.tickers)
+        print("[kalshi] Subscribing to tickers:", self.tickers)
         subscription_message = {
             "id": self.message_id,
             "cmd": "subscribe",
@@ -149,11 +151,11 @@ class KalshiWebSocketClient(KalshiBaseClient):
 
     async def on_error(self, error):
         """Callback for handling errors."""
-        print("Kalshi WebSocket error:", error)
+        print("[kalshi] WebSocket error:", error)
 
     async def on_close(self, close_status_code, close_msg):
         """Callback when WebSocket connection is closed."""
-        print("WebSocket connection closed with code:", close_status_code, "and message:", close_msg)
+        print("[kalshi] WebSocket connection closed with code:", close_status_code, "and message:", close_msg)
 
 
 
@@ -233,6 +235,45 @@ class KalshiWebSocketClient(KalshiBaseClient):
                 "spread": spread,
             }
         return best_offers
+    
+
+    async def place_order(self, ticker: str, price: int, size: int, side: str ="yes", post_only: bool = False, time_in_force: str = "fill_or_kill"): 
+        """Place an order on the Kalshi exchange."""
+        order_payload = {
+            "action": "buy",  
+            "type": "limit",
+            "ticker": ticker,
+            "count": size, 
+            "side": side,  # "yes" or "no" for the given ticker
+            "yes_price": price, # Price in cents (1-99). If side is "no", this is 100-no_price. 
+            "time_in_force": time_in_force,
+            "client_order_id": f"kalshi_arb_{int(time.time()*1000)}_{ticker}", # UNIQUE ID 
+            "post_only": post_only, 
+        }
+        
+        print(f"[kalshi] placing order: {order_payload}")
+        
+        headers = self.request_headers("POST", "/trade-api/v2/portfolio/orders")
+        headers['accept'] = "application/json"
+        url = self.HTTP_BASE_URL + "/trade-api/v2/portfolio/orders"
+
+        loop = asyncio.get_running_loop()
+        try:
+            # requests.post is synchronous, run it in an executor
+            response = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=order_payload))
+            
+            if response.status_code == 201: 
+                print("[kalshi] Order placed successfully:", response.json())
+                return response.json()
+            else:
+                print("[kalshi] Failed to place order:", response.status_code, response.text)
+                raise Exception(f"Kalshi order placement failed: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"[kalshi] Error placing order: {e}")
+            raise # Re-raise
+
+        
+
 def load_private_key_from_file(file_path: str) -> rsa.RSAPrivateKey:
     with open(file_path, "rb") as key_file:
         private_key = serialization.load_pem_private_key(

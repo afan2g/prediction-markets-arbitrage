@@ -1,4 +1,6 @@
 from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client.order_builder.constants import BUY, SELL
 import asyncio
 import json
 import websockets  # Need to use asyncio-compatible websockets library
@@ -12,7 +14,8 @@ class AsyncMarketDataClient:
     
     def __init__(self, rest_url="https://clob.polymarket.com/", 
                  ws_url="wss://ws-subscriptions-clob.polymarket.com/ws/", 
-                 api_key="", chain_id=137, callback=None):
+                 private_key=None, funder=None,
+                 api_creds=None, chain_id=137, callback=None):
         """
         Initialize the AsyncMarketDataClient with connection parameters.
         
@@ -24,10 +27,9 @@ class AsyncMarketDataClient:
         """
         self.REST = rest_url
         self.WSS = ws_url
-        self.key = api_key
         self.chain_id = chain_id
         self.orderbook = {}
-        self.client = ClobClient(self.REST, key=self.key, chain_id=self.chain_id)
+        self.client = ClobClient(self.REST, key=private_key, chain_id=self.chain_id, signature_type=2, funder=funder, creds=api_creds)
         self.websocket = None
         self._running = False
         self._task = None
@@ -51,7 +53,7 @@ class AsyncMarketDataClient:
             elif message["event_type"] == "price_change":
                 self.update_orderbook_from_price_change(message)
             elif message["event_type"] == "tick_size_change":
-                print("received tick size change")
+                print("[polymarket] received tick size change")
                 self.tick_size = message["new_tick_size"]
                 self.decimal_places = len(str(self.tick_size).split(".")[1]) if "." in str(self.tick_size) else 0
                 getcontext().prec = self.decimal_places + 2
@@ -67,14 +69,14 @@ class AsyncMarketDataClient:
         Args:
             websocket: WebSocket connection object
         """
-        print("Polymarket WebSocket connection opened.")
-        # Subscribe to the desired channels
+        print("[polymarket] WebSocket connection opened.")
         asset_ids = self.get_markets(condition_id)
+        # Subscribe to the desired channels
         subscribe_message = {
             "type": "market",
-            "assets_ids": asset_ids,
+            "assets_ids": [asset[0] for asset in asset_ids],
         }
-        print("Subscribing to assets:", asset_ids)
+        print("[polymarket] Subscribing to assets:", asset_ids)
         await websocket.send(json.dumps(subscribe_message))
 
     def get_markets(self, condition_id):
@@ -87,18 +89,18 @@ class AsyncMarketDataClient:
         Returns:
             list: List of asset IDs in the market
         """
-        print("Condition ID:", condition_id)
-        print("Getting Polymarket markets...")
+        print("[polymarket] Getting Polymarket markets for Condition ID:", condition_id)
         market = self.client.get_market(condition_id)
-        print("Polymarket market:", market)
+        print("[polymarket] market retrieved:", market)
         self.tick_size = market["minimum_tick_size"]
         self.decimal_places = len(str(self.tick_size).split(".")[1]) if "." in str(self.tick_size) else 0
         getcontext().prec = self.decimal_places + 2
         asset_ids = []
         for token in market["tokens"]:
-            asset_ids.append(token["token_id"])
-            self.orderbook[token["token_id"]] = self.client.get_order_book(token["token_id"]).__dict__
-            self.orderbook[token["token_id"]]["outcome"] = token["outcome"]
+            token_id, outcome = token["token_id"], token["outcome"]
+            asset_ids.append((token["token_id"], outcome))
+            self.orderbook[token_id] = self.client.get_order_book(token_id).__dict__
+            self.orderbook[token_id]["outcome"] = outcome
 
         # print("Parsed Orderbook:", self.orderbook)
         return asset_ids
@@ -163,21 +165,46 @@ class AsyncMarketDataClient:
         Get the best bid and ask for each asset in the orderbook.
         
         Returns:
-            dict: Dictionary mapping outcomes to their best bid/ask data
+            dict: Dictionary mapping outcomes to their best bid/ask data including token_id
         """
-
         best_bidasks = {}
-        for asset_id, book in self.orderbook.items():
-            if book["bids"] and book["asks"]:
+        for asset_id, book in self.orderbook.items(): 
+            if book.get("bids") and book.get("asks") and book["bids"] and book["asks"]:
                 best_bid = book["bids"][-1]
                 best_ask = book["asks"][-1]
                 best_bidasks[book["outcome"]] = {
+                    "token_id": asset_id,  
                     "best_bid": (best_bid['price'], best_bid["size"]),
                     "best_ask": (best_ask['price'], best_ask["size"]),
                     "spread": str(Decimal(best_ask["price"]) - Decimal(best_bid["price"])),
                     "timestamp": book["timestamp"],
                 }
         return best_bidasks
+    
+    async def place_order(self, token_id: str, price: float, size: float, side: str): 
+        print(f"[polymarket] placing order: {side} {size} of {token_id} @ {price}")
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=price,  # py_clob_client expects float for price
+            size=size,    # py_clob_client expects float for size
+            side=side     
+        )
+        
+        loop = asyncio.get_running_loop()
+        try:
+            # self.client methods are synchronous, run them in an executor
+            signed_order = await loop.run_in_executor(None, self.client.create_order, order_args)
+            print(f"[polymarket] Signed order: {signed_order}")
+            response = await loop.run_in_executor(None, self.client.post_order, signed_order, OrderType.FOK) # Use FOK for arbs
+            print(f"[polymarket] Order placement response: {response}")
+
+            if isinstance(response, dict) and response.get("status") == "error": # py_clob_client might return dict on error
+                 raise Exception(f"Polymarket order placement failed: {response.get('message', 'Unknown error')}")
+            
+
+        except Exception as e:
+            print(f"[polymarket] Error placing order: {e}")
+            raise  
     
     async def websocket_handler(self, condition_id=None):
         """
@@ -213,10 +240,10 @@ class AsyncMarketDataClient:
                     
                 
             except websockets.exceptions.ConnectionClosed:
-                print("WebSocket connection closed.")
-                print("orderbook:", self.orderbook)
+                print("[polymarket] WebSocket connection closed.")
+                print("[polymarket] orderbook:", self.orderbook)
             except Exception as e:
-                print(f"Error in Polymarket WebSocket handler: {e}")
+                print(f"[polymarket] Error in Polymarket WebSocket handler: {e}")
             finally:
                 self._running = False
                 self.websocket = None
@@ -230,7 +257,7 @@ class AsyncMarketDataClient:
                                          If None, you'll need to call get_markets later.
         """
         if self._running:
-            print("Already connected")
+            print("[polymarket] Already connected")
             return
             
         # Start WebSocket handler as a task
@@ -254,6 +281,16 @@ class AsyncMarketDataClient:
         """
         return self._running and self.websocket is not None
 
+    async def place_order(self, token_id: str, price: float, size: float):
+        print("[polymarket] placing order")
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=BUY
+        )
+        signed_order = self.client.create_order(order_args)
+        self.client.post_order(signed_order, OrderType.FOK)
 
     def find_index(self, price, asset_id, side):
         arr = self.orderbook[asset_id][side]
@@ -286,7 +323,7 @@ async def main():
     finally:
         # Ensure clean disconnect
         await client.disconnect()
-        print("Client disconnected.")
+        print("[polymarket] Client disconnected.")
 
 if __name__ == "__main__":
     asyncio.run(main())
