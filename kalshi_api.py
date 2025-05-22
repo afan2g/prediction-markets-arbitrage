@@ -237,7 +237,7 @@ class KalshiWebSocketClient(KalshiBaseClient):
         return best_offers
     
 
-    async def place_order(self, ticker: str, price: int, size: int, side: str ="yes", post_only: bool = False, time_in_force: str = "fill_or_kill"): 
+    async def place_order(self, ticker: str, price: int, size: int, side: str ="yes", post_only: bool = False, time_in_force: str = "fill_or_kill", expiration_ts: Optional[int] = None): 
         """Place an order on the Kalshi exchange."""
         order_payload = {
             "action": "buy",  
@@ -246,9 +246,10 @@ class KalshiWebSocketClient(KalshiBaseClient):
             "count": size, 
             "side": side,  # "yes" or "no" for the given ticker
             "yes_price": price, # Price in cents (1-99). If side is "no", this is 100-no_price. 
-            "time_in_force": time_in_force,
+            # "time_in_force": time_in_force, Not currently supported
             "client_order_id": f"kalshi_arb_{int(time.time()*1000)}_{ticker}", # UNIQUE ID 
             "post_only": post_only, 
+            "expiration_ts": expiration_ts,  # Optional, in milliseconds since epoch
         }
         
         print(f"[kalshi] placing order: {order_payload}")

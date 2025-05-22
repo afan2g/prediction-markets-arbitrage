@@ -1,11 +1,11 @@
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client.clob_types import OrderArgs, OrderType, MarketOrderArgs
+from py_clob_client.utilities import generate_orderbook_summary_hash, parse_raw_orderbook_summary, OrderBookSummary, OrderSummary
 from py_clob_client.order_builder.constants import BUY, SELL
 import asyncio
 import json
 import websockets  # Need to use asyncio-compatible websockets library
 from decimal import *
-
 class AsyncMarketDataClient:
     """
     A client for connecting to and processing CLOB (Central Limit Order Book) market data
@@ -14,7 +14,7 @@ class AsyncMarketDataClient:
     
     def __init__(self, rest_url="https://clob.polymarket.com/", 
                  ws_url="wss://ws-subscriptions-clob.polymarket.com/ws/", 
-                 private_key=None, funder=None,
+                 private_key=None, funder=None, proxies=None,
                  api_creds=None, chain_id=137, callback=None):
         """
         Initialize the AsyncMarketDataClient with connection parameters.
@@ -36,7 +36,9 @@ class AsyncMarketDataClient:
         self._callback = callback
         self.tick_size = None
         self.decimal_places = 2
+        self.proxies = proxies
 
+        print("[polymarket] Polymarket client initialized. Proxies:", self.proxies)
 
 
 
@@ -53,14 +55,14 @@ class AsyncMarketDataClient:
             elif message["event_type"] == "price_change":
                 self.update_orderbook_from_price_change(message)
             elif message["event_type"] == "tick_size_change":
-                print("[polymarket] received tick size change")
+                print("[polymarket] tick size changed to", message["new_tick_size"])
                 self.tick_size = message["new_tick_size"]
                 self.decimal_places = len(str(self.tick_size).split(".")[1]) if "." in str(self.tick_size) else 0
                 getcontext().prec = self.decimal_places + 2
-            # elif message["event_type"] == "last_trade_price":
-            #     print("last trade price")
-            # else:
-            #     print("received unknown message", message)
+            elif message["event_type"] == "last_trade_price":
+                self.update_orderbook_from_last_trade_price(message)
+            else:
+                print("received unknown message", message)
 
     async def on_connect(self, websocket, condition_id):
         """
@@ -95,6 +97,9 @@ class AsyncMarketDataClient:
         self.tick_size = market["minimum_tick_size"]
         self.decimal_places = len(str(self.tick_size).split(".")[1]) if "." in str(self.tick_size) else 0
         getcontext().prec = self.decimal_places + 2
+        print("[polymarket] tick size:", self.tick_size)
+        print("[polymarket] decimal places:", self.decimal_places)
+        
         asset_ids = []
         for token in market["tokens"]:
             token_id, outcome = token["token_id"], token["outcome"]
@@ -112,8 +117,6 @@ class AsyncMarketDataClient:
         Args:
             message (dict): Message containing book data
         """
-
-
         asset_id = message["asset_id"]
         self.orderbook[asset_id]["bids"] = message["bids"]
         self.orderbook[asset_id]["asks"] = message["asks"]
@@ -131,35 +134,27 @@ class AsyncMarketDataClient:
         asset_id, changes = message["asset_id"], message["changes"]
         for change in changes:
             price, side, size = change["price"], change["side"], change["size"]
-            self.update_orderbook_levels(asset_id, price, side, size)
+            self.update_orderbook_level(asset_id, price, side, size)
 
         self.orderbook[asset_id]["timestamp"] = message["timestamp"]
         self.orderbook[asset_id]["spread"] = Decimal(self.orderbook[asset_id]["asks"][-1]["price"]) - Decimal(self.orderbook[asset_id]["bids"][-1]["price"])
         self.orderbook[asset_id]["mid"] = (Decimal(self.orderbook[asset_id]["asks"][-1]["price"]) + Decimal(self.orderbook[asset_id]["bids"][-1]["price"])) / Decimal("2")
 
-    def update_orderbook_levels(self, asset_id, price, side, size):
+
+
+    def update_orderbook_from_last_trade_price(self, message):
+
         """
-        Update specific price levels in the orderbook.
+        Update orderbook from price change messages.
         
         Args:
-            asset_id (str): Asset ID
-            price (str): Price level
-            side (str): "BUY" or "SELL"
-            size (str): Size at the price level
+            message (dict): Message containing price changes
         """
-        trade_side = "bids" if side == "BUY" else "asks"
-        index = self.find_index(price, asset_id, trade_side)
-        if index == len(self.orderbook[asset_id][trade_side]):
-            self.orderbook[asset_id][trade_side].append({"price": price, "size": size})
-            return
-        if self.orderbook[asset_id][trade_side][index]["price"] != price:
-            self.orderbook[asset_id][trade_side].insert(index, {"price": price, "size": size})
-        else:
-            if size == 0:
-                self.orderbook[asset_id][trade_side].pop(index)
-            else:
-                self.orderbook[asset_id][trade_side][index]["size"] = size
-
+        asset_id, price, side, size, timestamp = message["asset_id"], message["price"], message["side"], message["size"], message["timestamp"]
+        self.update_orderbook_level(asset_id, price,  side, size)
+        self.orderbook[asset_id]["timestamp"] = timestamp
+        self.orderbook[asset_id]["spread"] = Decimal(self.orderbook[asset_id]["asks"][-1]["price"]) - Decimal(self.orderbook[asset_id]["bids"][-1]["price"])
+        self.orderbook[asset_id]["mid"] = (Decimal(self.orderbook[asset_id]["asks"][-1]["price"]) + Decimal(self.orderbook[asset_id]["bids"][-1]["price"])) / Decimal("2")
     def get_best_bidasks(self):
         """
         Get the best bid and ask for each asset in the orderbook.
@@ -181,7 +176,7 @@ class AsyncMarketDataClient:
                 }
         return best_bidasks
     
-    async def place_order(self, token_id: str, price: float, size: float, side: str): 
+    async def place_order(self, token_id: str, price: float, size: float, side: str, use_proxy: bool = False): 
         print(f"[polymarket] placing order: {side} {size} of {token_id} @ {price}")
         order_args = OrderArgs(
             token_id=token_id,
@@ -189,13 +184,19 @@ class AsyncMarketDataClient:
             size=size,    # py_clob_client expects float for size
             side=side     
         )
-        
+
         loop = asyncio.get_running_loop()
         try:
             # self.client methods are synchronous, run them in an executor
             signed_order = await loop.run_in_executor(None, self.client.create_order, order_args)
-            print(f"[polymarket] Signed order: {signed_order}")
-            response = await loop.run_in_executor(None, self.client.post_order, signed_order, OrderType.FOK) # Use FOK for arbs
+            print(f"[polymarket] Signed order: {signed_order.dict()}")
+            if use_proxy:
+                print(f"[polymarket] Using proxy for order placement")
+                # Use the proxy for order placement
+                response = await loop.run_in_executor(None, self.client.post_order, signed_order, OrderType.FOK, self.proxies)
+            else:
+                # Use the default method for order placement
+                response = await loop.run_in_executor(None, self.client.post_order, signed_order, OrderType.FOK)
             print(f"[polymarket] Order placement response: {response}")
 
             if isinstance(response, dict) and response.get("status") == "error": # py_clob_client might return dict on error
@@ -281,31 +282,46 @@ class AsyncMarketDataClient:
         """
         return self._running and self.websocket is not None
 
-    async def place_order(self, token_id: str, price: float, size: float):
-        print("[polymarket] placing order")
-        order_args = OrderArgs(
-            token_id=token_id,
-            price=price,
-            size=size,
-            side=BUY
-        )
-        signed_order = self.client.create_order(order_args)
-        self.client.post_order(signed_order, OrderType.FOK)
-
     def find_index(self, price, asset_id, side):
         arr = self.orderbook[asset_id][side]
         price = Decimal(price)
         l,r = 0, len(arr)-1
+
+        descending = False
+        if side == 'asks':
+            descending = True
         while l <= r:
-            mid = (l+r)// 2
-            if Decimal(arr[mid]["price"]) == price:
+            mid = (l + r) // 2
+            mid_price = Decimal(arr[mid]["price"])
+
+            if mid_price == price:
                 return mid
-            elif Decimal(arr[mid]["price"]) < price:
-                l = mid + 1
+
+            if descending:
+                if mid_price < price:
+                    r = mid - 1
+                else:
+                    l = mid + 1
             else:
-                r = mid - 1
+                if mid_price < price:
+                    l = mid + 1
+                else:
+                    r = mid - 1
         return l
-# Example usage:
+    
+    def update_orderbook_level(self, asset_id, price, side, size):
+        side = "bids" if side == "BUY" else "asks"
+        index = self.find_index(price, asset_id, side)
+        if index == len(self.orderbook[asset_id][side]):
+            self.orderbook[asset_id][side].append({"price": price, "size": size})
+            return
+        if self.orderbook[asset_id][side][index]["price"] != price:
+            self.orderbook[asset_id][side].insert(index, {"price": price, "size": size})
+        else:
+            if size == '0':
+                self.orderbook[asset_id][side].pop(index)
+            else:
+                self.orderbook[asset_id][side][index]["size"] = size
 async def main():
     # Create client instance
     client = AsyncMarketDataClient()

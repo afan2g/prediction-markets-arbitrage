@@ -10,7 +10,44 @@ import math
 import os
 from decimal import Decimal, getcontext
 from dotenv import load_dotenv
+import tkinter as tk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.pyplot as plt
 getcontext().prec = 8
+
+class RealTimeGraph:
+    def __init__(self, master, market_labels):
+        self.master = master
+        master.title("Real-time Market Prices")
+
+        self.fig, self.ax = plt.subplots()
+        self.canvas = FigureCanvasTkAgg(self.fig, master=master)
+        self.canvas_widget = self.canvas.get_tk_widget()
+        self.canvas_widget.pack(fill=tk.BOTH, expand=True)
+
+        self.market_labels = market_labels
+        
+        self.ax.set_ylabel("Price (0-1)")
+        self.ax.set_xticks(range(len(self.market_labels)))
+        self.ax.set_xticklabels(self.market_labels, rotation=15, ha="right")
+        self.ax.set_ylim(0, 1.05) 
+        self.fig.tight_layout()
+
+        self.bars = self.ax.bar(range(len(self.market_labels)), [0]*len(self.market_labels), width=0.8, color='skyblue')
+        self.bar_labels = self.ax.bar_label(self.bars)
+        self.canvas.draw_idle()
+
+    def update_graph(self, p1, p2, k1, k2):
+        data_values = [float(p1), float(p2), float(k1), float(k2)]
+        
+        for bar_obj, height in zip(self.bars, data_values):
+            bar_obj.set_height(height)
+        
+        for label in self.bar_labels:
+            label.remove()
+        self.bar_labels = self.ax.bar_label(self.bars)
+        self.canvas.draw_idle()
+
 
 def load_private_key_from_file(file_path: str) -> rsa.RSAPrivateKey:
     with open(file_path, "rb") as key_file:
@@ -21,25 +58,50 @@ def load_private_key_from_file(file_path: str) -> rsa.RSAPrivateKey:
         )
     return private_key
 
+async def run_tk_event_loop(root, interval=0.01):
+    try:
+        while root.winfo_exists():
+            root.update_idletasks()
+            root.update()
+            await asyncio.sleep(interval)
+        print("Tkinter window was closed.")
+    except tk.TclError as e:
+        if "application has been destroyed" not in str(e).lower():
+            print(f"Unexpected TclError in tk_event_loop: {e}")
+        else:
+            print("Tkinter application destroyed (tk_event_loop).")
+    except asyncio.CancelledError:
+        print("Tkinter event loop task cancelled.")
+        if root.winfo_exists():
+            root.destroy()
+        raise
 async def message_consumer(
     queue: asyncio.Queue, 
     polymarket_client: AsyncMarketDataClient, 
-    kalshi_client: KalshiWebSocketClient     
+    kalshi_client: KalshiWebSocketClient,
+    real_time_graph: RealTimeGraph     
 ):
     """Centralized consumer of all WS messages."""
     polymarket_offers = {}
     kalshi_offers = {}
     prev_price_levels = []
+    prev_levels = []
     total_profit = Decimal('0') # Use Decimal for profit/cost
     total_cost = Decimal('0')
 
     # These are Polymarket outcomes and Kalshi tickers
-    markets = ['Phillies', 'Rockies', "KXMLBGAME-25MAY19PHICOL-PHI", "KXMLBGAME-25MAY19PHICOL-COL"]
+    
+
+    markets = ['Dodgers', 'Diamondbacks', "KXMLBGAME-25MAY21AZLAD-LAD", "KXMLBGAME-25MAY21AZLAD-AZ"]
     
     # Mapping Polymarket outcomes to their corresponding "yes" token_id.
     # This will be populated when the first Polymarket message with token_ids arrives.
     # Or, ideally, the AsyncMarketDataClient could provide a method to get token_id by outcome.
     # For now, we rely on token_id being in polymarket_offers after client modification.
+    arbitrage_regime = False
+    arbitrage_start = None
+    arbitrage_times = []
+    #plot 
 
     while True:
         source_name, payload = await queue.get()
@@ -78,16 +140,25 @@ async def message_consumer(
             p2 = Decimal(p2_data[0])
             k1 = Decimal(k1_data[0]) / Decimal("100") # Kalshi prices are 1-99, convert to 0.01-0.99 for check_arbitrage
             k2 = Decimal(k2_data[0]) / Decimal("100")
+            real_time_graph.update_graph(p1, p2, k1, k2) # Update the graph with new data
         except (KeyError, TypeError, IndexError) as e:
             print(f"[ERROR] Could not extract price data: {e}. Offers: PM={polymarket_offers}, Kalshi={kalshi_offers}")
             queue.task_done()
             continue
-
+        
+        
         result = check_markets_arbitrage(p1, p2, k1, k2, shares=Decimal("1.0")) # Use Decimal for shares
         
-        print(f"{markets[0]}: {p1_data}, {markets[1]}: {p2_data}, {markets[2][-3:]}: {k1_data}, {markets[3][-3:]}: {k2_data}, Arb PNLs: M1={result['market1_pnl']:.4f}, M2={result['market2_pnl']:.4f}")
+        cur_levels = [p1_data, p2_data, k1_data, k2_data]
+        if not prev_levels or cur_levels != prev_levels:
+            print(f"{markets[0]}: {p1_data}, {markets[1]}: {p2_data}, {markets[2][-3:]}: {k1_data}, {markets[3][-3:]}: {k2_data}, Arb PNLs: M1={result['market1_pnl']:.4f}, M2={result['market2_pnl']:.4f}")
+        prev_levels = cur_levels
 
         if result["is_arbitrage"]:
+            if not arbitrage_regime:
+                print(f"[INFO] Arbitrage regime started at {result['strategy']}")
+                arbitrage_regime = True
+                arbitrage_start = asyncio.get_event_loop().time()
             m1_action_idx = result["market1_action"] # 0 for markets[0] (e.g. Phillies), 1 for markets[1] (e.g. Rockies)
             m2_action_idx = result["market2_action"] # 0 for Kalshi's version of markets[0], 1 for Kalshi's version of markets[1]
             profit_per_share = result["profit_per_share"]
@@ -130,8 +201,8 @@ async def message_consumer(
                 continue
 
             # For now, let's cap the trade size for testing, e.g., 1 contract/share
-            trade_size = min(max_size_without_slippage, Decimal("1.0")) 
-            # trade_size = max_size_without_slippage # Uncomment for full size
+            # trade_size = min(max_size_without_slippage, Decimal("1.0")) 
+            trade_size = max_size_without_slippage # Uncomment for full size
 
             cost_pm = pm_price_to_buy * trade_size
             cost_kalshi = (kalshi_price_to_buy_cents / Decimal("100")) * trade_size
@@ -143,15 +214,18 @@ async def message_consumer(
             # --- Attempt to place orders ---
             try:
                 print(f"Attempting to place Polymarket order: BUY {float(trade_size)} of {pm_outcome_name} (TokenID: {pm_token_id}) @ {float(pm_price_to_buy)}")
+                '''
                 await polymarket_client.place_order(
                     token_id=pm_token_id,
                     price=float(pm_price_to_buy), # py_clob_client expects float
                     size=float(trade_size),       # py_clob_client expects float
-                    side=BUY                      # We are always buying the ASK in this arb setup
+                    side=BUY,                     # We are always buying the ASK in this arb setup
+                    use_proxy=True                # Use proxy to bypass geo-blocking
                 )
                 print("Polymarket order attempt successful.")
 
                 print(f"Attempting to place Kalshi order: BUY {int(trade_size)} of {kalshi_ticker_to_buy} @ {int(kalshi_price_to_buy_cents)}c, side 'yes'")
+                #fill or kill currently not supported in Kalshi api 2.0.4, will be added in 2.0.5
                 await kalshi_client.place_order(
                     ticker=kalshi_ticker_to_buy,
                     price=int(kalshi_price_to_buy_cents), # Kalshi expects price in cents (integer)
@@ -160,8 +234,15 @@ async def message_consumer(
                     post_only=True,                       # Taker for this arbitrage
                     time_in_force="fill_or_kill"          # FOK for immediate execution
                 )
+                await kalshi_client.place_order(
+                    ticker=kalshi_ticker_to_buy,
+                    price=int(kalshi_price_to_buy_cents), # Kalshi expects price in cents (integer)
+                    size=int(trade_size),                 # Kalshi expects integer size
+                    side="yes",                           # Always buy "yes"
+                    expiration_ts=0                       # Expiration set in the past, IOC order   
+                )
                 print("Kalshi order attempt successful.")
-                
+                '''
                 # If both orders are successfully submitted (not necessarily filled yet, but FOK helps)
                 total_cost += total_potential_cost_for_arb
                 total_profit += potential_profit_for_arb
@@ -171,13 +252,18 @@ async def message_consumer(
             except Exception as e:
                 print(f"Error during order placement: {e}")
                 # Not updating prev_price_levels here, so it might retry if the error was transient
-
+        else:
+            if arbitrage_regime:
+                print(f"[INFO] Arbitrage regime ended. Total profit: {total_profit:.4f}, Total cost: {total_cost:.4f}")
+                arbitrage_regime = False
+                arbitrage_times.append(asyncio.get_event_loop().time() - arbitrage_start)
+                arbitrage_start = None
+                print(f"Arbitrage times: {arbitrage_times}")
         queue.task_done()
 
 
 def check_arbitrage(market1_price: Decimal, market2_inverse_price: Decimal, shares: Decimal):
     market2_fee = calculate_kalshi_fees(market2_inverse_price, shares)
-    market2_fee = 0
     profit_if_win_market1 = (1 - market1_price) * shares
     profit_if_win_market2 = (1 - market2_inverse_price) * shares - market2_fee
     cost_market1 = market1_price * shares
@@ -266,13 +352,19 @@ async def main():
         api_secret=poly_api_secret,
         api_passphrase=poly_api_passphrase,
     )
+
+    polymarket_order_proxies = {
+        "http": os.getenv("PROXY"),
+        "https": os.getenv("PROXY"),
+    }
     queue = asyncio.Queue()
     
     # Initialize clients
     polymarket_client = AsyncMarketDataClient(
         api_creds=api_creds, 
         private_key=POLY_PRIVATE_KEY, 
-        funder=POLY_PROXY_ADDRESS, 
+        funder=POLY_PROXY_ADDRESS,
+        proxies=polymarket_order_proxies,
         callback=lambda data: queue.put_nowait(("polymarket", data))
     )
     kalshi_client = KalshiWebSocketClient(
@@ -283,15 +375,21 @@ async def main():
     )
 
     # Polymarket condition ID
-    polymarket_condition_id = "0xccedb1b5b5eaa489362d89a9745de4bfe40fbb8ead3144f557592c47f11702ee" 
+    polymarket_condition_id = "0x8c85f2635638f08e8e0c3c1114489424dc120c4eba66233884ae54c815f19d08" 
+
+
 
     # Kalshi tickers
-    kalshi_tickers = ["KXMLBGAME-25MAY19PHICOL-PHI", "KXMLBGAME-25MAY19PHICOL-COL"] 
+    kalshi_tickers = ["KXMLBGAME-25MAY21AZLAD-LAD", "KXMLBGAME-25MAY21AZLAD-AZ"] 
 
+    root = tk.Tk()
+    root.geometry("800x600")
+    real_time_graph = RealTimeGraph(root, market_labels=["PM LA Dodgers", "PM AZ Diamondbacks", "Kalshi LA Dodgers", "Kalshi AZ Diamondbacks"])
     tasks = [
+        asyncio.create_task(run_tk_event_loop(root), name="TkinterLoop"),
         asyncio.create_task(polymarket_client.connect(polymarket_condition_id)),
         asyncio.create_task(kalshi_client.connect(tickers=kalshi_tickers)),
-        asyncio.create_task(message_consumer(queue, polymarket_client, kalshi_client)) 
+        asyncio.create_task(message_consumer(queue, polymarket_client, kalshi_client, real_time_graph)) 
     ]
 
     try:
